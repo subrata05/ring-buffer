@@ -1,6 +1,6 @@
 # 🔄 Ring Buffer
 
-> A lightweight, zero-allocation circular buffer implementation in C — built for embedded systems and high-performance applications.
+> A circular buffer implementation in C — built for embedded systems and high-performance applications.
 
 ---
 
