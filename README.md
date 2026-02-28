@@ -126,11 +126,11 @@ When the write pointer reaches the end of the physical buffer, it wraps automati
 
 ### Internal Structure
 
-![ring buffer structure](./rb-structure.png.png)
+![ring buffer structure](.rb-structure.png.png)
 
 ### Visual Representation
 
-![ring buffer layout](./rb-layout.png.png)
+![ring buffer layout](.rb-layout.png.png)
 
 ---
 
