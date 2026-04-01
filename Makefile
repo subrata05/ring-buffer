@@ -1,5 +1,8 @@
+# Ring Buffer Library Makefile
+# Author: subrata05
+
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -std=c99 -O2 -Iinclude
+CFLAGS = -Wall -Wextra -Werror -std=c11 -O2 -Iinclude
 DEBUG_CFLAGS = -g -O0 -DDEBUG
 
 SRC_DIR = src
@@ -15,7 +18,7 @@ TEST_SOURCES = $(TEST_DIR)/test_ring_buffer.c
 EXAMPLE_SOURCES = $(EXAMPLE_DIR)/example_usage.c
 
 # targets
-.PHONY: all clean test example debug
+.PHONY: all clean test example debug static
 
 all: $(BUILD_DIR) $(BUILD_DIR)/test_ring_buffer $(BUILD_DIR)/example_usage
 
