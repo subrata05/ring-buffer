@@ -1,269 +1,200 @@
+/**
+ * @file    ring_buffer.c
+ * @author  subrata05
+ * @brief   Lock-free SPSC ring buffer implementation
+ */
+
 #include "ring_buffer.h"
 #include <string.h>
 
+static inline bool is_power_of_two(size_t n)
+{
+    return (n != 0u) && ((n & (n - 1u)) == 0u);
+}
+
+/* Unsigned subtraction handles wraparound automatically */
+static inline size_t count_from_heads(size_t head, size_t tail)
+{
+    return head - tail;
+}
+
 bool ring_buff_init(ring_buff_t *rb, uint8_t *buf, size_t size)
 {
-    if (rb == NULL || buf == NULL || size == 0) {
+    if (rb == NULL || buf == NULL || !is_power_of_two(size)) {
         return false;
     }
-    
     rb->buffer = buf;
     rb->size = size;
-    rb->head = 0;
-    rb->tail = 0;
-    rb->count = 0;
-    rb->full = false;
-    
+    rb->mask = size - 1u;
+    atomic_init(&rb->head, 0u);
+    atomic_init(&rb->tail, 0u);
     return true;
 }
 
 void ring_buff_reset(ring_buff_t *rb)
 {
-    if (rb == NULL) {
-        return;
-    }
-    
-    rb->head = 0;
-    rb->tail = 0;
-    rb->count = 0;
-    rb->full = false;
+    if (rb == NULL) return;
+    atomic_store_explicit(&rb->head, 0u, memory_order_relaxed);
+    atomic_store_explicit(&rb->tail, 0u, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
 }
 
 bool ring_buff_is_empty(const ring_buff_t *rb)
 {
-    if (rb == NULL) {
-        return true;
-    }
-    return (rb->count == 0);
+    if (rb == NULL) return true;
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    return (head == tail);
 }
 
 bool ring_buff_is_full(const ring_buff_t *rb)
 {
-    if (rb == NULL) {
-        return false;
-    }
-    return (rb->count == rb->size);
+    if (rb == NULL) return false;
+    size_t head = atomic_load_explicit(&rb->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    return (count_from_heads(head, tail) >= rb->size);
 }
 
 size_t ring_buff_count(const ring_buff_t *rb)
 {
-    if (rb == NULL) {
-        return 0;
-    }
-    return rb->count;
+    if (rb == NULL) return 0u;
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    return count_from_heads(head, tail);
 }
 
 size_t ring_buff_available(const ring_buff_t *rb)
 {
-    if (rb == NULL) {
-        return 0;
-    }
-    return rb->size - rb->count;
+    if (rb == NULL) return 0u;
+    size_t head = atomic_load_explicit(&rb->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    return rb->size - count_from_heads(head, tail);
 }
 
 size_t ring_buff_capacity(const ring_buff_t *rb)
 {
-    if (rb == NULL) {
-        return 0;
-    }
+    if (rb == NULL) return 0u;
     return rb->size;
 }
 
+/* Producer: load head relaxed, tail acquire (see consumer's progress), release head */
 bool ring_buff_put(ring_buff_t *rb, uint8_t byte)
 {
-    if (rb == NULL || rb->count >= rb->size) {
-        return false;
-    }
-    
-    rb->buffer[rb->head] = byte;
-    rb->head = (rb->head + 1) % rb->size;
-    rb->count++;
-    
+    if (rb == NULL) return false;
+    size_t head = atomic_load_explicit(&rb->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    if (count_from_heads(head, tail) >= rb->size) return false;
+    rb->buffer[head & rb->mask] = byte;
+    atomic_store_explicit(&rb->head, head + 1u, memory_order_release);
     return true;
 }
 
+/* Consumer: load tail relaxed, head acquire (see producer's progress), release tail */
 bool ring_buff_get(ring_buff_t *rb, uint8_t *byte)
 {
-    if (rb == NULL || byte == NULL || rb->count == 0) {
-        return false;
-    }
-    
-    *byte = rb->buffer[rb->tail];
-    rb->tail = (rb->tail + 1) % rb->size;
-    rb->count--;
-    
+    if (rb == NULL || byte == NULL) return false;
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    if (tail == head) return false;
+    *byte = rb->buffer[tail & rb->mask];
+    atomic_store_explicit(&rb->tail, tail + 1u, memory_order_release);
     return true;
 }
 
+/* Write in two chunks if wrapping, single release commits all */
 size_t ring_buff_write(ring_buff_t *rb, const uint8_t *data, size_t len)
 {
-    if (rb == NULL || data == NULL || len == 0) {
-        return 0;
-    }
-    
-    size_t available = rb->size - rb->count;
+    if (rb == NULL || data == NULL || len == 0u) return 0u;
+    size_t head = atomic_load_explicit(&rb->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    size_t available = rb->size - count_from_heads(head, tail);
     size_t to_write = (len < available) ? len : available;
+    if (to_write == 0u) return 0u;
     
-    if (to_write == 0) {
-        return 0;
-    }
+    size_t head_idx = head & rb->mask;
+    size_t first_part = rb->size - head_idx;
+    if (first_part > to_write) first_part = to_write;
     
-    // handle wrap-around: write in two parts if necessary
-    size_t first_part = rb->size - rb->head;
-    if (first_part > to_write) {
-        first_part = to_write;
-    }
-    
-    memcpy(&rb->buffer[rb->head], data, first_part);
-    
+    memcpy(&rb->buffer[head_idx], data, first_part);
     if (first_part < to_write) {
-        // wrap around to beginning
-        size_t second_part = to_write - first_part;
-        memcpy(rb->buffer, &data[first_part], second_part);
-        rb->head = second_part;
-    } else {
-        rb->head = (rb->head + to_write) % rb->size;
+        memcpy(rb->buffer, &data[first_part], to_write - first_part);
     }
     
-    rb->count += to_write;
-    
+    atomic_store_explicit(&rb->head, head + to_write, memory_order_release);
     return to_write;
 }
 
+/* Read in two chunks if wrapping, single release commits all */
 size_t ring_buff_read(ring_buff_t *rb, uint8_t *data, size_t len)
 {
-    if (rb == NULL || data == NULL || len == 0 || rb->count == 0) {
-        return 0;
-    }
+    if (rb == NULL || data == NULL || len == 0u) return 0u;
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    size_t count = count_from_heads(head, tail);
+    size_t to_read = (len < count) ? len : count;
+    if (to_read == 0u) return 0u;
     
-    size_t to_read = (len < rb->count) ? len : rb->count;
+    size_t tail_idx = tail & rb->mask;
+    size_t first_part = rb->size - tail_idx;
+    if (first_part > to_read) first_part = to_read;
     
-    // handle wrap-around: read in two parts if necessary
-    size_t first_part = rb->size - rb->tail;
-    if (first_part > to_read) {
-        first_part = to_read;
-    }
-    
-    memcpy(data, &rb->buffer[rb->tail], first_part);
-    
+    memcpy(data, &rb->buffer[tail_idx], first_part);
     if (first_part < to_read) {
-        // wrap around to beginning
-        size_t second_part = to_read - first_part;
-        memcpy(&data[first_part], rb->buffer, second_part);
-        rb->tail = second_part;
-    } else {
-        rb->tail = (rb->tail + to_read) % rb->size;
+        memcpy(&data[first_part], rb->buffer, to_read - first_part);
     }
     
-    rb->count -= to_read;
-    
+    atomic_store_explicit(&rb->tail, tail + to_read, memory_order_release);
     return to_read;
 }
 
-size_t ring_buff_peek(const ring_buff_t *rb, uint8_t *data, size_t len)
-{
-    if (rb == NULL || data == NULL || len == 0 || rb->count == 0) {
-        return 0;
-    }
-    
-    size_t to_peek = (len < rb->count) ? len : rb->count;
-    size_t tail = rb->tail;
-    
-    // randle wrap-around: peek in two parts if necessary
-    size_t first_part = rb->size - tail;
-    if (first_part > to_peek) {
-        first_part = to_peek;
-    }
-    
-    memcpy(data, &rb->buffer[tail], first_part);
-    
-    if (first_part < to_peek) {
-        size_t second_part = to_peek - first_part;
-        memcpy(&data[first_part], rb->buffer, second_part);
-    }
-    
-    return to_peek;
-}
-
-size_t ring_buff_skip(ring_buff_t *rb, size_t len)
-{
-    if (rb == NULL || len == 0 || rb->count == 0) {
-        return 0;
-    }
-    
-    size_t to_skip = (len < rb->count) ? len : rb->count;
-    rb->tail = (rb->tail + to_skip) % rb->size;
-    rb->count -= to_skip;
-    
-    return to_skip;
-}
-
+/* Returns contiguous chunk at tail, clamped to available count */
 size_t ring_buff_get_read_ptr(const ring_buff_t *rb, uint8_t **ptr)
 {
-    if (rb == NULL || ptr == NULL || rb->count == 0) {
-        if (ptr != NULL) {
-            *ptr = NULL;
-        }
-        return 0;
-    }
-    
-    *ptr = &rb->buffer[rb->tail];
-    
-    // return contiguous bytes available (until wrap or end of data)
-    size_t contiguous = rb->size - rb->tail;
-    if (contiguous > rb->count) {
-        contiguous = rb->count;
-    }
-    
+    if (ptr != NULL) *ptr = NULL;
+    if (rb == NULL || ptr == NULL) return 0u;
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    size_t count = count_from_heads(head, tail);
+    if (count == 0u) return 0u;
+    size_t tail_idx = tail & rb->mask;
+    size_t contiguous = rb->size - tail_idx;
+    if (contiguous > count) contiguous = count;
+    *ptr = &rb->buffer[tail_idx];
     return contiguous;
 }
 
+/* Returns contiguous space at head, clamped to available space */
 size_t ring_buff_get_write_ptr(const ring_buff_t *rb, uint8_t **ptr)
 {
-    if (rb == NULL || ptr == NULL || rb->count >= rb->size) {
-        if (ptr != NULL) {
-            *ptr = NULL;
-        }
-        return 0;
-    }
-    
-    *ptr = &rb->buffer[rb->head];
-    
-    // return contiguous space available (until wrap or full)
-    size_t contiguous = rb->size - rb->head;
-    size_t available = rb->size - rb->count;
-    if (contiguous > available) {
-        contiguous = available;
-    }
-    
+    if (ptr != NULL) *ptr = NULL;
+    if (rb == NULL || ptr == NULL) return 0u;
+    size_t head = atomic_load_explicit(&rb->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    size_t available = rb->size - count_from_heads(head, tail);
+    if (available == 0u) return 0u;
+    size_t head_idx = head & rb->mask;
+    size_t contiguous = rb->size - head_idx;
+    if (contiguous > available) contiguous = available;
+    *ptr = &rb->buffer[head_idx];
     return contiguous;
 }
 
 void ring_buff_advance_read(ring_buff_t *rb, size_t len)
 {
-    if (rb == NULL || len == 0) {
-        return;
-    }
-    
-    if (len > rb->count) {
-        len = rb->count;
-    }
-    
-    rb->tail = (rb->tail + len) % rb->size;
-    rb->count -= len;
+    if (rb == NULL || len == 0u) return;
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_relaxed);
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    size_t count = count_from_heads(head, tail);
+    if (len > count) len = count;
+    atomic_store_explicit(&rb->tail, tail + len, memory_order_release);
 }
 
 void ring_buff_advance_write(ring_buff_t *rb, size_t len)
 {
-    if (rb == NULL || len == 0) {
-        return;
-    }
-    
-    size_t available = rb->size - rb->count;
-    if (len > available) {
-        len = available;
-    }
-    
-    rb->head = (rb->head + len) % rb->size;
-    rb->count += len;
+    if (rb == NULL || len == 0u) return;
+    size_t head = atomic_load_explicit(&rb->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    size_t available = rb->size - count_from_heads(head, tail);
+    if (len > available) len = available;
+    atomic_store_explicit(&rb->head, head + len, memory_order_release);
 }

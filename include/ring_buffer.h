@@ -1,172 +1,224 @@
+/**
+ * @file    ring_buffer.h
+ * @author  subrata05
+ * @brief   Lock-free single-producer/single-consumer (SPSC) ring buffer
+ * 
+ * A thread-safe ring buffer implementation using C11 atomics with 
+ * acquire-release semantics. Requires buffer size to be power of 2.
+ * 
+ * @note    This is NOT a multi-producer/multi-consumer queue. Only 
+ *          one thread may write and one thread may read concurrently.
+ * 
+ * @warning Buffer size MUST be power of 2 (e.g., 16, 32, 64, 128, 256, 
+ *          512, 1024, etc.) due to bitwise indexing optimization.
+ */
+
 #ifndef RING_BUFFER_H
 #define RING_BUFFER_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ring buff instance structure */
-
+/**
+ * Lock-free ring buffer instance structure (Single-Producer/Single-Consumer)
+ * 
+ * This implementation uses atomic head/tail indices with acquire-release 
+ * semantics for thread-safe operation without mutexes. Buffer size must 
+ * be a power of 2 to enable fast bitwise masking instead of modulo.
+ */
 typedef struct {
-    uint8_t *buffer;      // ptr to the data buff
-    size_t head;          // wr index
-    size_t tail;          // rd index
-    size_t size;          // total capacity of buff
-    size_t count;         // current number of elements
-    bool full;            // flag to distinguish full vs empty when head == tail
+    uint8_t        *buffer;     // Pointer to the data buffer
+    size_t          size;       // Total capacity (must be power of 2)
+    size_t          mask;       // Bitmask for fast indexing (size - 1)
+    _Atomic size_t  head;       // Write index (only modified by producer)
+    _Atomic size_t  tail;       // Read index (only modified by consumer)
 } ring_buff_t;
 
 /**
- * init ring buff
+ * Initialize ring buffer
  * 
- * @param rb    ptr to ring buff structure to initialize
- * @param buf   ptr to allocated memory for the buff (must be rb->size bytes)
- * @param size  size of the buff in bytes
- * @return      true on success, false on invalid parameters
+ * @param rb    Pointer to ring buffer structure to initialize
+ * @param buf   Pointer to allocated memory (must be rb->size bytes)
+ * @param size  Size of buffer in bytes (must be power of 2, e.g., 16, 32, 64, 128...)
+ * @return      true on success, false on invalid parameters or non-power-of-2 size
+ * 
+ * @note        Size restriction enables bitwise AND masking: index & mask vs index % size
  */
 bool ring_buff_init(ring_buff_t *rb, uint8_t *buf, size_t size);
 
 /**
- * reset ring buff to empty state (discards all data)
+ * Reset ring buffer to empty state (discards all data)
  * 
- * @param rb    ptr to ring buff
+ * @param rb    Pointer to ring buffer
+ * 
+ * @warning     Not thread-safe with concurrent operations. Ensure producer 
+ *              and consumer are idle before calling. Uses seq_cst fence 
+ *              to synchronize with any ongoing atomic operations.
  */
 void ring_buff_reset(ring_buff_t *rb);
 
 /**
- * check if ring buff is empty
+ * Check if ring buffer is empty
  * 
- * @param rb    ptr to ring buff
+ * @param rb    Pointer to ring buffer
  * @return      true if empty, false otherwise
+ * 
+ * @note        Thread-safe for consumer (reader) context. Consumer loads 
+ *              tail relaxed, head acquire — sees all prior producer writes.
  */
 bool ring_buff_is_empty(const ring_buff_t *rb);
 
 /**
- * check if ring buf is full
+ * Check if ring buffer is full
  * 
- * @param rb    prt to ring buff
+ * @param rb    Pointer to ring buffer
  * @return      true if full, false otherwise
+ * 
+ * @note        Thread-safe for producer (writer) context. Producer loads 
+ *              head relaxed, tail acquire — sees all prior consumer reads.
  */
 bool ring_buff_is_full(const ring_buff_t *rb);
 
 /**
- * get num of bytes currently stored in buff
+ * Get number of bytes currently stored in buffer
  * 
- * @param rb    ptr to ring buff
- * @return      num of bytes available to read
+ * @param rb    Pointer to ring buffer
+ * @return      Number of bytes available to read
+ * 
+ * @note        Thread-safe for consumer context. May return stale value 
+ *              if called concurrently with producer (indicates minimum available).
  */
 size_t ring_buff_count(const ring_buff_t *rb);
 
 /**
- * get available space in buff
+ * Get available space in buffer
  * 
- * @param rb    ptr to ring buff
- * @return      num of bytes that can be written
+ * @param rb    Pointer to ring buffer
+ * @return      Number of bytes that can be written
+ * 
+ * @note        Thread-safe for producer context. May return stale value 
+ *              if called concurrently with consumer (indicates minimum space).
  */
 size_t ring_buff_available(const ring_buff_t *rb);
 
 /**
- * get total capacity of buff
+ * Get total capacity of buffer
  * 
- * @param rb    ptr to ring buff
- * @return      total size of buf in bytes
+ * @param rb    Pointer to ring buffer
+ * @return      Total size of buffer in bytes (power of 2)
  */
 size_t ring_buff_capacity(const ring_buff_t *rb);
 
 /**
- * wr data to ring buff
+ * Write a single byte to buffer
  * 
- * @param rb    ptr to ring buff
- * @param data  ptr to data to write
- * @param len   num of bytes to write
- * @return      num of bytes actually written (may be less than len if buff full)
- */
-size_t ring_buff_write(ring_buff_t *rb, const uint8_t *data, size_t len);
-
-/**
- * read data from ring buff
+ * @param rb    Pointer to ring buffer
+ * @param byte  Byte to write
+ * @return      true if written, false if buffer full
  * 
- * @param rb    ptr to ring buff
- * @param data  ptr to buff to store read data
- * @param len   max num of bytes to read
- * @return      num of bytes actually read
- */
-size_t ring_buff_read(ring_buff_t *rb, uint8_t *data, size_t len);
-
-/**
- * peek at data without removing it from buff
- * 
- * @param rb    ptr to ring buff
- * @param data  ptr to buf to store peeked data
- * @param len   max num of bytes to peek
- * @return      num of bytes actually peeked
- */
-size_t ring_buff_peek(const ring_buff_t *rb, uint8_t *data, size_t len);
-
-/**
- * skip or discard bytes from buff without reading
- * 
- * @param rb    ptr to ring buff
- * @param len   num of bytes to skip
- * @return      num of bytes actually skipped
- */
-size_t ring_buff_skip(ring_buff_t *rb, size_t len);
-
-/**
- * write a single byte to buff
- * 
- * @param rb    ptr to ring buff
- * @param byte  byte to write
- * @return      true if written, false if buff full
+ * @warning     Only call from producer (writer) context. Not reentrant 
+ *              for multiple producers — single-producer/single-consumer only.
  */
 bool ring_buff_put(ring_buff_t *rb, uint8_t byte);
 
 /**
- * read a single byte from buff
+ * Read a single byte from buffer
  * 
- * @param rb    ptr to ring buff
- * @param byte  ptr to store read byte
- * @return      true if read, false if buff empty
+ * @param rb    Pointer to ring buffer
+ * @param byte  Pointer to store read byte
+ * @return      true if read, false if buffer empty
+ * 
+ * @warning     Only call from consumer (reader) context. Not reentrant 
+ *              for multiple consumers — single-producer/single-consumer only.
  */
 bool ring_buff_get(ring_buff_t *rb, uint8_t *byte);
 
 /**
- * get ptr to linear contiguous read buff (if available)
- * useful in DMA or zero-copy operations
+ * Write multiple bytes to buffer
  * 
- * @param rb    ptr to ring buff
- * @param ptr   ptr to store buf ptr
- * @return      num of contiguous bytes available to read
+ * @param rb    Pointer to ring buffer
+ * @param data  Pointer to data to write
+ * @param len   Number of bytes to write
+ * @return      Number of bytes actually written (may be less than len if buffer full)
+ * 
+ * @warning     Only call from producer context. Handles wrap-around internally 
+ *              via two-part memcpy. Uses release semantics to ensure data 
+ *              is visible to consumer before head index update.
+ */
+size_t ring_buff_write(ring_buff_t *rb, const uint8_t *data, size_t len);
+
+/**
+ * Read multiple bytes from buffer
+ * 
+ * @param rb    Pointer to ring buffer
+ * @param data  Pointer to buffer to store read data
+ * @param len   Maximum number of bytes to read
+ * @return      Number of bytes actually read
+ * 
+ * @warning     Only call from consumer context. Handles wrap-around internally 
+ *              via two-part memcpy. Uses release semantics to ensure tail 
+ *              update is visible to producer.
+ */
+size_t ring_buff_read(ring_buff_t *rb, uint8_t *data, size_t len);
+
+/**
+ * Get pointer to linear contiguous read buffer (zero-copy/DMA support)
+ * 
+ * @param rb    Pointer to ring buffer
+ * @param ptr   Pointer to store buffer pointer (NULL if no data available)
+ * @return      Number of contiguous bytes available to read (until wrap or empty)
+ * 
+ * @note        Returns pointer to raw buffer — data remains in ring buffer 
+ *              until ring_buff_advance_read() or ring_buff_read() called.
+ *              Useful for DMA transfers or zero-copy processing.
+ * 
+ * @warning     Only call from consumer context. Returned pointer valid until 
+ *              next consumer operation. Concurrent producer may write new data 
+ *              after returned count (check ring_buff_count() for true available).
  */
 size_t ring_buff_get_read_ptr(const ring_buff_t *rb, uint8_t **ptr);
 
 /**
- * get ptr to linear contiguous write buff (if available)
- * useful in DMA or zero-copy operations
+ * Get pointer to linear contiguous write buffer (zero-copy/DMA support)
  * 
- * @param rb    ptr to ring buffer
- * @param ptr   ptr to store buffer ptr
- * @return      num of contiguous bytes available to write
+ * @param rb    Pointer to ring buffer
+ * @param ptr   Pointer to store buffer pointer (NULL if buffer full)
+ * @return      Number of contiguous bytes available to write (until wrap or full)
+ * 
+ * @note        Returns pointer to raw buffer — space reserved but not marked 
+ *              as written until ring_buff_advance_write() called. Useful for 
+ *              DMA transfers or external data production.
+ * 
+ * @warning     Only call from producer context. Do not write beyond returned 
+ *              count. Call ring_buff_advance_write() after writing to commit.
  */
 size_t ring_buff_get_write_ptr(const ring_buff_t *rb, uint8_t **ptr);
 
 /**
- * advance read ptr after external read (use with get_read_ptr)
+ * Advance read pointer after external read (use with ring_buff_get_read_ptr)
  * 
- * @param rb    ptr to ring buffer
- * @param len   num of bytes to advance
+ * @param rb    Pointer to ring buffer
+ * @param len   Number of bytes to advance (clamped to available count)
+ * 
+ * @note        Commits external read operation. Must be called after 
+ *              ring_buff_get_read_ptr() to release buffer space to producer.
  */
 void ring_buff_advance_read(ring_buff_t *rb, size_t len);
 
 /**
- * advanced write ptr after external write (use with get_write_ptr)
+ * Advance write pointer after external write (use with ring_buff_get_write_ptr)
  * 
- * @param rb    ptr to ring buffer
- * @param len   num of bytes to advance
+ * @param rb    Pointer to ring buffer
+ * @param len   Number of bytes to advance (clamped to available space)
+ * 
+ * @note        Commits external write operation. Must be called after 
+ *              ring_buff_get_write_ptr() to make data visible to consumer.
  */
 void ring_buff_advance_write(ring_buff_t *rb, size_t len);
 
