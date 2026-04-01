@@ -1,6 +1,6 @@
 # 🔄 Ring Buffer
 
-> A circular buffer implementation in C — built for embedded systems and high-performance applications.
+> A **lock-free** circular buffer implementation in C — built for embedded systems, real-time applications, and high-performance concurrent scenarios.
 
 ---
 
@@ -9,10 +9,19 @@
 | | |
 |---|---|
 | 🚫 **Zero dynamic allocation** | No `malloc` or `free` — ever |
-| ⚡ **Interrupt-safe** | Safe for single-producer/single-consumer (SPSC) use |
+| ⚡ **Lock-free SPSC** | Single-producer/single-consumer via C11 atomics |
+| 🔒 **Thread-safe** | No mutexes needed — acquire-release memory ordering |
 | 🔁 **Seamless wrap-around** | Handled automatically, no data copying required |
 | 📦 **Zero-copy API** | Direct pointer access for DMA and high-throughput scenarios |
 | ⏱️ **Fully deterministic** | Constant-time execution on every operation |
+| 🚀 **Fast indexing** | Bitwise masking (power-of-2 sizing) |
+
+---
+
+## ⚠️ Requirements
+
+- **C11 compiler** (`_Atomic`, `stdatomic.h`)
+- **Power-of-2 buffer size** (e.g., 16, 32, 64, 128, 256, 512, 1024...)
 
 ---
 
@@ -23,20 +32,20 @@
 #include <stdio.h>
 
 int main(void) {
-    // Allocate buffer memory (static, stack, or global — your choice)
+    // Buffer size MUST be power of 2
     uint8_t buffer_memory[256];
-    ring_buffer_t rb;
+    ring_buff_t rb;
 
     // Initialize
-    ring_buffer_init(&rb, buffer_memory, sizeof(buffer_memory));
+    ring_buff_init(&rb, buffer_memory, sizeof(buffer_memory));
 
     // Write data
     uint8_t data[] = "Hello, World!";
-    ring_buffer_write(&rb, data, sizeof(data));
+    ring_buff_write(&rb, data, sizeof(data));
 
     // Read data back
     uint8_t output[50];
-    size_t bytes_read = ring_buffer_read(&rb, output, sizeof(output));
+    size_t bytes_read = ring_buff_read(&rb, output, sizeof(output));
 
     return 0;
 }
@@ -50,33 +59,45 @@ int main(void) {
 
 | Function | Description |
 |---|---|
-| `ring_buffer_init(rb, buf, size)` | Initialize buffer with pre-allocated memory |
-| `ring_buffer_reset(rb)` | Clear all data and reset to empty state |
-| `ring_buffer_capacity(rb)` | Get total buffer size in bytes |
-| `ring_buffer_count(rb)` | Get number of bytes currently stored |
-| `ring_buffer_available(rb)` | Get number of bytes that can still be written |
-| `ring_buffer_is_empty(rb)` | Check if buffer has no data |
-| `ring_buffer_is_full(rb)` | Check if buffer cannot accept more data |
+| `ring_buff_init(rb, buf, size)` | Initialize buffer with pre-allocated memory (size must be power of 2) |
+| `ring_buff_reset(rb)` | Clear all data (not thread-safe with active operations) |
+| `ring_buff_capacity(rb)` | Get total buffer size in bytes |
+| `ring_buff_count(rb)` | Get bytes stored (consumer context) |
+| `ring_buff_available(rb)` | Get bytes writable (producer context) |
+| `ring_buff_is_empty(rb)` | Check if buffer has no data |
+| `ring_buff_is_full(rb)` | Check if buffer cannot accept more data |
 
 ### Data Operations
 
 | Function | Description |
 |---|---|
-| `ring_buffer_write(rb, data, len)` | Write multiple bytes — returns bytes actually written |
-| `ring_buffer_read(rb, data, len)` | Read and remove bytes — returns bytes actually read |
-| `ring_buffer_peek(rb, data, len)` | Non-destructive read (data remains in buffer) |
-| `ring_buffer_skip(rb, len)` | Discard bytes without reading |
-| `ring_buffer_put(rb, byte)` | Write a single byte |
-| `ring_buffer_get(rb, byte)` | Read a single byte |
+| `ring_buff_write(rb, data, len)` | Write multiple bytes — returns bytes actually written |
+| `ring_buff_read(rb, data, len)` | Read and remove bytes — returns bytes actually read |
+| `ring_buff_put(rb, byte)` | Write a single byte |
+| `ring_buff_get(rb, byte)` | Read a single byte |
 
-### ⚡ Zero-Copy Operations *(Advanced)*
+### ⚡ Zero-Copy Operations (DMA-friendly)
 
 | Function | Description |
 |---|---|
-| `ring_buffer_get_write_ptr(rb, &ptr)` | Get pointer to contiguous write space |
-| `ring_buffer_get_read_ptr(rb, &ptr)` | Get pointer to contiguous read space |
-| `ring_buffer_advance_write(rb, len)` | Advance write pointer after external write |
-| `ring_buffer_advance_read(rb, len)` | Advance read pointer after external read |
+| `ring_buff_get_write_ptr(rb, &ptr)` | Get pointer to contiguous write space |
+| `ring_buff_get_read_ptr(rb, &ptr)` | Get pointer to contiguous read space |
+| `ring_buff_advance_write(rb, len)` | Commit external write (advance write pointer) |
+| `ring_buff_advance_read(rb, len)` | Commit external read (advance read pointer) |
+
+---
+
+## 🧵 Thread Safety Model
+
+**Single-Producer / Single-Consumer (SPSC) only**
+
+| Context | Functions | Safety |
+|---|---|---|
+| Producer (writer) | `put`, `write`, `get_write_ptr`, `advance_write`, `available`, `is_full` | Call from one thread only |
+| Consumer (reader) | `get`, `read`, `get_read_ptr`, `advance_read`, `count`, `is_empty` | Call from one thread only |
+| Either | `capacity`, `init`, `reset` | Call when no concurrent access |
+
+> ⚠️ Do not use from multiple producers or multiple consumers simultaneously.
 
 ---
 
@@ -85,52 +106,48 @@ int main(void) {
 ### Basic Read / Write
 
 ```c
-uint8_t buffer[64];
-ring_buffer_t rb;
-ring_buffer_init(&rb, buffer, 64);
+uint8_t buffer[64];  // Power of 2
+ring_buff_t rb;
+ring_buff_init(&rb, buffer, 64);
 
-// write a string
+// Write a string
 const char *msg = "hello";
-ring_buffer_write(&rb, (uint8_t *)msg, strlen(msg));
+ring_buff_write(&rb, (uint8_t *)msg, strlen(msg));
 
-// read into array
+// Read into array
 uint8_t output[32];
-size_t n = ring_buffer_read(&rb, output, sizeof(output));
+size_t n = ring_buff_read(&rb, output, sizeof(output));
 // n == 5, output contains "hello"
 ```
 
-### Single Byte Operations *(UART-style)*
+### Interrupt-Driven UART (SPSC)
 
 ```c
-// ISR or polling loop — receiving bytes
+// ISR context — producer
 void uart_rx_isr(uint8_t byte) {
-    ring_buffer_put(&uart_rx_buffer, byte);
+    ring_buff_put(&uart_rx_buffer, byte);  // Lock-free, safe in ISR
 }
 
-// main loop: processing received bytes
+// Main loop — consumer
 void process_data(void) {
     uint8_t byte;
-    while (ring_buffer_get(&uart_rx_buffer, &byte)) {
+    while (ring_buff_get(&uart_rx_buffer, &byte)) {
         handle_byte(byte);
     }
 }
 ```
 
-### Wrap-Around Handling
+### Zero-Copy DMA Transfer
 
-When the write pointer reaches the end of the physical buffer, it wraps automatically to the beginning — no user intervention, no data copying, no surprises.
+```c
+uint8_t *ptr;
+size_t space = ring_buff_get_write_ptr(&rb, &ptr);
 
----
+// Configure DMA to write 'space' bytes to 'ptr'
+// ... DMA completes ...
 
-## 🏗️ Architecture
-
-### Internal Structure
-
-![ring buffer structure](./rb-structure.png)
-
-### Visual Representation
-
-![ring buffer layout](./rb-layout.png)
+ring_buff_advance_write(&rb, dma_bytes_written);
+```
 
 ---
 
@@ -138,11 +155,10 @@ When the write pointer reaches the end of the physical buffer, it wraps automati
 
 ### Requirements
 
-- `gcc` or compatible C compiler
-- `make`
-- Standard C library
+- GCC or compatible C11 compiler
+- GNU Make
 
-### Build Targets
+### Build
 
 ```bash
 make          # build tests and example
@@ -150,7 +166,7 @@ make test     # run unit tests
 make example  # run usage example
 make static   # build static library (libringbuffer.a)
 make debug    # build with debug symbols
-make clean    # remove build artifacts and .gdbhistory
+make clean    # remove build artifacts
 ```
 
 ### Running Tests
@@ -159,14 +175,14 @@ make clean    # remove build artifacts and .gdbhistory
 $ make test
 ./build/test_ring_buffer
 
->> Running ring buffer driver tests
+>> RUNNING RING BUFFER DRIVER TEST
+>> Lock-free SPSC version (power-of-2 sizing required)
 
->> Test: basic init
-   PASS: init should succeed
-   PASS: should be empty after init
-   ...
+>> TEST: basic init
+PASS: init with power-of-2 should succeed
+...
 
->> Yaay! All tests passed!
+>> YAAY! ALL TESTS PASSED
 ```
 
 ---
@@ -175,9 +191,8 @@ $ make test
 
 | Metric | Value |
 |---|---|
-| Code size | ~1–2 KB *(depends on functions used)* |
-| RAM overhead | **24 bytes** per instance *(32-bit systems)* |
-| Data buffer | User-provided — any size |
-| Heap usage | **Zero** — no `malloc` / `free` |
-
----
+| Code size | ~1–2 KB (depends on functions used) |
+| RAM overhead | 24 bytes per instance (32-bit) / 32 bytes (64-bit) |
+| Data buffer | User-provided — power of 2 |
+| Heap usage | Zero — no `malloc` / `free` |
+| Lock overhead | Zero — no mutexes/semaphores |
