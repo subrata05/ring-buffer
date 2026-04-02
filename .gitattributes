@@ -1,0 +1,10 @@
+.github/ export-ignore
+*.png export-ignore
+*.jpg export-ignore
+tests/ export-ignore
+examples/ export-ignore
+
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+Makefile text eol=lf
