@@ -1,0 +1,12 @@
+# Export ignore - these won't be in "Download ZIP" or release tarballs
+.github/ export-ignore
+*.png export-ignore
+*.jpg export-ignore
+tests/ export-ignore
+examples/ export-ignore
+
+# Normalize line endings
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+Makefile text eol=lf
